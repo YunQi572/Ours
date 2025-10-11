@@ -35,6 +35,7 @@ class Generator(nn.Module):
             hid_layers.append(nn.Linear(d_in, d_out))
             #与Ghost不同的地方(添加了一个批归一化层)
             hid_layers.append(nn.BatchNorm1d(d_out))  # 添加BN层
+            
             hid_layers.append(nn.Tanh())
             hid_layers.append(nn.Dropout(p = dropout, inplace = False))
         self.hid_layers = nn.Sequential(* hid_layers)
@@ -507,3 +508,53 @@ def get_SC(synthetic_data, clients_nodes_num, clients_graph_energy, device, h):
         weight = clients_nodes_num[i] / total_nodes
         weighted_sc += weight * sc_value
     return weighted_sc  # 现在是 torch tensor，可参与反向传播
+
+
+#高频
+def get_Shigh(synthetic_data):
+    """
+    计算图的高频分量 S_high
+    
+    参数:
+    synthetic_data: 图数据对象 Data(x, edge_index, y)
+    
+    返回:
+    S_high: 高频分量值
+    """
+    # 获取节点特征和边索引
+    node_features = synthetic_data.x  # [N, d] 节点特征矩阵
+    edge_index = synthetic_data.edge_index
+    num_nodes = node_features.shape[0]
+    feature_dim = node_features.shape[1]
+    
+    # 计算拉普拉斯矩阵 L = D - A (组合拉普拉斯矩阵)
+    edge_index_laplacian, edge_weight_laplacian = get_laplacian(
+        edge_index, 
+        num_nodes=num_nodes, 
+        normalization=None  # 使用组合拉普拉斯矩阵 L = D - A
+    )
+    
+    # 转换为稠密矩阵
+    L = to_dense_adj(edge_index_laplacian, edge_attr=edge_weight_laplacian, max_num_nodes=num_nodes)[0]
+    
+    # 随机选取每个节点相同的10%的特征平均作为节点的特征值x_i
+    num_selected_features = max(1, int(0.1 * feature_dim))  # 至少选择1个特征
+    
+    # 为了保证每个节点选择相同的特征维度，我们随机选择特征索引
+    selected_indices = torch.randperm(feature_dim)[:num_selected_features]
+    
+    # 提取选定特征并计算每个节点的平均值
+    selected_features = node_features[:, selected_indices]  # [N, num_selected_features]
+    x = selected_features.mean(dim=1)  # [N,] 每个节点的特征值
+    
+    # 计算 S_high = x^T L x / x^T x
+    xTLx = torch.matmul(torch.matmul(x.unsqueeze(0), L), x.unsqueeze(1)).squeeze()  # x^T L x
+    xTx = torch.dot(x, x)  # x^T x
+    
+    # 避免除零
+    if xTx == 0:
+        S_high = torch.tensor(0.0, device=node_features.device)
+    else:
+        S_high = xTLx / xTx
+    
+    return S_high
