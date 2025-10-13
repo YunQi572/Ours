@@ -34,7 +34,7 @@ class Generator(nn.Module):
             d_out = dims[i + 1]
             hid_layers.append(nn.Linear(d_in, d_out))
             #与Ghost不同的地方(添加了一个批归一化层)
-            # hid_layers.append(nn.BatchNorm1d(d_out))  # 添加BN层
+            hid_layers.append(nn.BatchNorm1d(d_out))  # 添加BN层
             
             hid_layers.append(nn.Tanh())
             hid_layers.append(nn.Dropout(p = dropout, inplace = False))
@@ -282,6 +282,9 @@ def compute_led(graph_data):
     
 
 #高斯核函数
+def gaussian_kernel1(x):        #np
+    return (1 / np.sqrt(2 * np.pi) * np.exp(-0.5 * x**2))
+
 def gaussian_kernel(x):
     return (1 / torch.sqrt(torch.tensor(2 * np.pi, device=x.device))) * torch.exp(-0.5 * x ** 2)
 
@@ -299,12 +302,125 @@ def KDE(x, y, bandwidth, kernel_func):
     density_estimation = torch.sum(kernel_values) / (n * bandwidth)
     return density_estimation
 
+
+def apply_kde_to_energy_dist1(energy_dist, bandwidth, eval_nums, device):   #np
+    """
+    使用KDE将能量分布转换为概率分布
+    
+    参数:
+    energy_dist: 能量分布 [N,]
+    bandwidth: KDE带宽参数
+    eval_nums: 评估点的数量，决定输出概率分布的维度
+    device: 计算设备
+    
+    返回:
+    prob_dist: 概率分布 [eval_nums,]
+    """
+    # 确保输入为tensor且在正确设备上
+    if isinstance(energy_dist, torch.Tensor):
+        energy_dist = energy_dist.detach().cpu().numpy()
+    
+    # 归一化能量分布为概率权重(多余)
+    # energy_dist = energy_dist / torch.sum(energy_dist)
+    
+    # n = len(energy_dist)  # 原始能量分布的长度
+    
+    # 创建评估点网格（频率域的归一化位置），数量由eval_nums决定
+    x_eval = torch.linspace(0, 1, eval_nums, device=device).cpu().numpy()
+    # prob_dist = torch.zeros(eval_nums, device=device)
+    
+    # # 数据点位置（频率索引归一化）
+    # y_data = torch.linspace(0, 1, n, device=device).cpu().numpy()
+    # weights = energy_dist.cpu().numpy()
+    
+    # # 对每个评估点使用KDE计算概率密度
+    # for i in range(eval_nums):
+    #     x_eval_point = x_eval[i].item()
+        
+    #     # 使用utils中的KDE函数计算加权概率密度
+    #     density = 0.0
+    #     # for j in range(n):
+    #     #     density += KDE(x_eval_point, y_data[j], bandwidth, gaussian_kernel) * weights[j]
+    #     prob_dist[i] = density
+    
+
+    # 归一化为概率分布
+    # prob_dist = prob_dist / torch.sum(prob_dist)
+    
+    prob_dist = np.array([KDE(xi, energy_dist, bandwidth, gaussian_kernel) for xi in x_eval])
+    
+    return prob_dist
+
 def apply_kde_to_energy_dist(energy_dist, bandwidth, eval_nums, device):
     # energy_dist: [N,] torch tensor
     x_eval = torch.linspace(0, 1, eval_nums, device=device)
     prob_dist = torch.stack([KDE(xi, energy_dist, bandwidth, gaussian_kernel) for xi in x_eval])
     prob_dist = prob_dist / torch.sum(prob_dist)
     return prob_dist
+
+
+def compute_js_divergence_from_prob_dist1(prob_dist_1, prob_dist_2, device):
+    """
+    直接计算两个概率分布之间的Jensen-Shannon散度
+    （假设输入已经是通过KDE处理的概率分布）
+    
+    参数:
+    prob_dist_1: 第一个概率分布 [N1,]
+    prob_dist_2: 第二个概率分布 [N2,]
+    
+    返回:
+    js_divergence: Jensen-Shannon散度值
+    """
+    # 确保输入为tensor且在同一设备上
+    # prob_dist_1 = prob_dist_1.to(device)
+    # prob_dist_2 = prob_dist_2.to(device)
+    prob_dist_1 = torch.tensor(prob_dist_1, dtype=torch.float32).to(device)
+    prob_dist_2 = torch.tensor(prob_dist_2, dtype=torch.float32).to(device)
+
+    '''
+        # 处理不同长度的分布：填充或截断到相同长度
+        max_len = max(len(prob_dist_1), len(prob_dist_2))
+        
+        if len(prob_dist_1) < max_len:
+            # 用零填充较短的分布
+            padding = torch.zeros(max_len - len(prob_dist_1), device=device)
+            prob_dist_1 = torch.cat([prob_dist_1, padding])
+        elif len(prob_dist_1) > max_len:
+            prob_dist_1 = prob_dist_1[:max_len]
+            
+        if len(prob_dist_2) < max_len:
+            padding = torch.zeros(max_len - len(prob_dist_2), device=device)
+            prob_dist_2 = torch.cat([prob_dist_2, padding])
+        elif len(prob_dist_2) > max_len:
+            prob_dist_2 = prob_dist_2[:max_len]
+        
+        # 重新归一化
+        prob_dist_1 = prob_dist_1 / torch.sum(prob_dist_1)
+        prob_dist_2 = prob_dist_2 / torch.sum(prob_dist_2)
+    '''
+
+    # 计算Jensen-Shannon散度
+    # JS(P||Q) = 0.5 * KL(P||M) + 0.5 * KL(Q||M), 其中 M = 0.5(P+Q)
+    
+    # 计算混合分布 M = 0.5(P + Q)
+    M = 0.5 * (prob_dist_1 + prob_dist_2)
+    
+    # 避免log(0)的情况，添加小的epsilon
+    epsilon = 1e-10
+    prob_dist_1 = prob_dist_1 + epsilon
+    prob_dist_2 = prob_dist_2 + epsilon
+    M = M + epsilon
+    
+    # 计算KL散度: KL(P||M) = sum(P * log(P/M))
+    kl_1_m = torch.sum(prob_dist_1 * torch.log(prob_dist_1 / M))
+    kl_2_m = torch.sum(prob_dist_2 * torch.log(prob_dist_2 / M))
+    
+    # Jensen-Shannon散度
+    js_divergence = 0.5 * kl_1_m + 0.5 * kl_2_m
+    
+    return js_divergence.item()
+
+
 def compute_js_divergence_from_prob_dist(prob_dist_1, prob_dist_2):
     M = 0.5 * (prob_dist_1 + prob_dist_2)
     epsilon = 1e-10
@@ -318,6 +434,62 @@ def compute_js_divergence_from_prob_dist(prob_dist_1, prob_dist_2):
 
 
 #得到生成图与客户端图之间的SC值
+def get_SC1(synthetic_data, clients_nodes_num, clients_graph_energy, device, h):    #np
+    """
+    计算生成图与客户端图之间的SC值（Spectral Consistency）
+    
+    参数:
+    synthetic_data: 生成图，Data(x, y, edge_index)
+    clients_nodes_num: 客户端图的节点数量列表 [N1, N2, ..., Nc]
+    clients_graph_energy: 客户端的拉普拉斯能量分布集合 [[energy_dist_1], [energy_dist_2], ...]
+    
+    返回:
+    weighted_sc: 按节点数量加权平均的SC值
+    """
+    # 1. 计算生成图的拉普拉斯能量分布
+    synthetic_energy_dist = compute_led(synthetic_data)
+    
+    # 2. 设置核密度估计的带宽参数h
+    # h = getattr(args, 'bandwidth', 0.1)  # 默认带宽为0.1
+    
+    # 3. 计算与每个客户端图的SC值
+    sc_values = []
+    total_nodes = sum(clients_nodes_num)
+    
+    # 使用KDE将拉普拉斯能量分布转换为概率分布
+    # 获取所有客户端子图节点数量的最大值
+    max_client_nodes = max(clients_nodes_num)
+
+    # 获取生成图 synthetic_data 的节点数量
+    synthetic_nodes_num = synthetic_data.x.shape[0]
+
+    # 获取两者中的最大值
+    max_nodes_num = max(max_client_nodes, synthetic_nodes_num)
+    
+    # 3.1 为生成图的能量分布生成概率分布
+    synthetic_prob_dist = apply_kde_to_energy_dist(synthetic_energy_dist, h, max_nodes_num, device)
+
+    for i, client_energy_dist in enumerate(clients_graph_energy):
+        # 3.2 为当前客户端图的能量分布生成概率分布
+        client_prob_dist = apply_kde_to_energy_dist(client_energy_dist, h, max_nodes_num, device)
+        
+        # 3.3 计算Jensen-Shannon散度
+        js_divergence = compute_js_divergence_from_prob_dist(
+            synthetic_prob_dist, client_prob_dist, device
+        )
+        
+        # SC = JS散度（值越小表示越相似）
+        sc_value = js_divergence
+        sc_values.append(sc_value)
+    
+    # 4. 按客户端图的节点数量进行加权平均
+    weighted_sc = 0.0
+    for i, sc_value in enumerate(sc_values):
+        weight = clients_nodes_num[i] / total_nodes
+        weighted_sc += weight * sc_value
+    
+    return weighted_sc
+
 def get_SC(synthetic_data, clients_nodes_num, clients_graph_energy, device, h):
     synthetic_energy_dist = compute_led(synthetic_data)  # torch tensor
     max_client_nodes = max(clients_nodes_num)

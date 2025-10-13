@@ -81,7 +81,7 @@ def main():
         print(f"\n========== Task {task_id}/{tasks_num} ==========")
         for round in range(args.rounds):
             print(f"******************************{round}*************************************")
-            # 1. 客户端训练
+            # 客户端训练
             print(f"Training clients for task {task_id}...")
             client_losses = []
             for client_id, client in enumerate(clients):
@@ -93,7 +93,7 @@ def main():
             avg_client_loss = sum(client_losses) / len(client_losses)
             print(f"Average client loss: {avg_client_loss:.4f}")
 
-            # 2. 客户端发送信息
+            # 客户端发送信息
             print("Clients sending information to server...")
             for client_id, client in enumerate(clients):
                 client.send_message(task_id)
@@ -102,26 +102,20 @@ def main():
             # 收集客户端信息用于后续处理
             server.clients_nodes_num = [server.message_pool[f"client_{client_id}"]["nodes_num"] 
                                     for client_id in range(args.clients_num)]
+            server.clients_learned_nodes_num = [server.message_pool[f"client_{client_id}"]["learned_nodes_num"] 
+                                    for client_id in range(args.clients_num)]
             # print(f"Debug Info server.clients_nodes_num:{server.clients_nodes_num}")    正确
             server.clients_graph_energy = [server.message_pool[f"client_{client_id}"]["data_LED"] 
                                         for client_id in range(args.clients_num)]
             # print(f"Debug Info server.clients_graph_energy:{server.clients_graph_energy}") 正确
 
-            # 3. 全局模型更新参数
+            # 全局模型更新参数
             print("Server aggregating client models...")
             server.aggregate()
             
             # print(f"message_pool: {message_pool}")
-            
-            # # 如果是第一个任务，初始化last_global_model
-            # if task_id == 0:
-            #     with torch.no_grad():
-            #         print("Initializing last_global_model for future knowledge distillation...")
-            #         for last_param, global_param in zip(server.last_global_model.parameters(), 
-            #                                         server.global_model.parameters()):
-            #             last_param.data.copy_(global_param.data)
 
-            # 4. 如果不是第一个任务，进行生成器训练、数据生成和知识蒸馏
+            # 如果不是第一个任务，进行生成器训练、数据生成和知识蒸馏
             if task_id != 0:
                 print(f"Training generator and link predictor for task {task_id}...")
                 server.train(task_id)
@@ -132,13 +126,13 @@ def main():
                 print("Performing knowledge distillation...")
                 server.KD_train(task_id)
 
-            # 5. 全局模型下发模型参数
+            # 全局模型下发模型参数
             print("Server broadcasting updated global model...")
             server.send_message()
         
         server.update_last_global_model()
 
-        # 6. 评估模型
+        # 评估模型
         for eval_task_id in range(0, task_id + 1):
             total_nodes_num = 0
             for client_id in range(args.clients_num):

@@ -32,8 +32,9 @@ class OursServer(BaseServer):
         self.threshold = self.args.threshold
         #初始化存储客户端信息的列表
         self.clients_nodes_num = []
+        self.clients_learned_nodes_num = []
         self.clients_graph_energy = []
-        
+        self.clients_mean_var = []
         # 初始化损失值存储列表 - 改为每个任务存储连续的epoch损失
         self.generator_losses = {}  # 存储每个任务所有通信轮次的生成器训练损失值 {task_id: [losses]}
         self.generator_loss_details = {}  # 存储每个任务所有通信轮次的生成器训练详细损失分项 {task_id: [details]}
@@ -82,10 +83,10 @@ class OursServer(BaseServer):
         self.link_predictor = LinkPredictor(input_dim = self.args.input_dim, hidden_dim=64 , dropout=0.5).to(self.device)
 
         # 为生成器的每个批归一化层添加DeepInversionHook钩子
-        self.hooks = []
-        for m in self.generator.modules():
-            if isinstance(m, (nn.BatchNorm1d, nn.BatchNorm2d, nn.BatchNorm3d)):
-                self.hooks.append(DeepInversionHook(m, self.bn_mmt))
+        # self.hooks = []
+        # for m in self.generator.modules():
+        #     if isinstance(m, (nn.BatchNorm1d, nn.BatchNorm2d, nn.BatchNorm3d)):
+        #         self.hooks.append(DeepInversionHook(m, self.bn_mmt))
         # print(f"hooks: {self.hooks}")
 
         # 设置训练模式
@@ -153,11 +154,65 @@ class OursServer(BaseServer):
             loss_ce = cross_entropy_loss(global_predictions, random_labels)
             
             # 6.2 批归一化损失：从所有钩子中收集BN特征损失
-            # loss_bn = sum([h.r_feature for h in self.hooks]) if self.hooks else torch.tensor(0.0, device=self.device)
-            loss_bn = sum([h.r_feature for h in self.hooks])
+            # loss_bn = sum([h.r_feature for h in self.hooks])
+            #从message_pool中获取每个客户端的本地数据的均值和方差
+            client_means = []
+            client_vars = []
+            client_weights = []  # 节点数量作为权重
+            
+            for client_id in range(self.clients_num):
+                client_key = f"client_{client_id}"
+                if client_key in self.message_pool and "mean_var" in self.message_pool[client_key]:
+                    mean_var_info = self.message_pool[client_key]["mean_var"]
+                    client_means.append(mean_var_info["mean"])
+                    client_vars.append(mean_var_info["var"])
+                    # 使用节点数量作为权重
+                    client_weights.append(self.message_pool[client_key]["learned_nodes_num"])
+            
+            #计算客户端数据的组合均值和组合方差
+            if client_means:
+                # 将列表转换为张量
+                client_means = torch.stack(client_means)  # [num_clients, feature_dim]
+                client_vars = torch.stack(client_vars)    # [num_clients, feature_dim]
+                client_weights = torch.tensor(client_weights, dtype=torch.float32, device=self.device)  # [num_clients]
+                
+                # 计算总样本数
+                total_samples = client_weights.sum()  # N = n1 + n2 + n3
+                
+                if total_samples > 0:
+                    # 1. 计算组合均值 (加权平均均值)
+                    # μ_combined = (n1*μ1 + n2*μ2 + n3*μ3) / (n1 + n2 + n3)
+                    combined_mean = torch.sum(client_means * client_weights.unsqueeze(1), dim=0) / total_samples  # [feature_dim]
+                    
+                    # 2. 计算组合方差 (按照公式)
+                    # σ²_combined = (1/N) * Σ[ni*σi² + ni*(μi - μ_combined)²]
+                    # 组内变异：ni * σi²
+                    within_group_variance = client_weights.unsqueeze(1) * client_vars  # [num_clients, feature_dim]
+                    
+                    # 组间变异：ni * (μi - μ_combined)²
+                    mean_diff_squared = (client_means - combined_mean.unsqueeze(0)) ** 2  # [num_clients, feature_dim]
+                    between_group_variance = client_weights.unsqueeze(1) * mean_diff_squared  # [num_clients, feature_dim]
+                    
+                    # 总的组合方差
+                    combined_var = (torch.sum(within_group_variance, dim=0) + torch.sum(between_group_variance, dim=0)) / total_samples  # [feature_dim]
+                else:
+                    combined_mean = torch.zeros(self.args.input_dim, device=self.device)
+                    combined_var = torch.ones(self.args.input_dim, device=self.device)
+            else:
+                combined_mean = torch.zeros(self.args.input_dim, device=self.device)
+                combined_var = torch.ones(self.args.input_dim, device=self.device)
+
+            #计算生成数据节点特征的均值和总体方差
+            gen_mean = torch.mean(generated_features, dim=0)  # [feature_dim]
+            gen_var = torch.var(generated_features, dim=0, unbiased=False)  # [feature_dim]
+
+            #计算bn_loss (使用MSE损失比较均值和方差)
+            loss_bn_mean = F.mse_loss(gen_mean, combined_mean.detach())
+            loss_bn_var = F.mse_loss(gen_var, combined_var.detach())
+            loss_bn = loss_bn_mean + loss_bn_var
             
             #6.3 SC损失： 
-            loss_sc = get_SC(synthetic_data = synthetic_data, clients_nodes_num = self.clients_nodes_num, clients_graph_energy = self.clients_graph_energy, device = self.device, h = self.args.bandwidth)
+            loss_sc = get_SC(synthetic_data = synthetic_data, clients_nodes_num = self.clients_learned_nodes_num, clients_graph_energy = self.clients_graph_energy, device = self.device, h = self.args.bandwidth)
 
             #6.4 边缘损失函数
             # 使用全局模型（当前模型）对生成数据进行预测
@@ -201,10 +256,8 @@ class OursServer(BaseServer):
                 loss_div = torch.tensor(0.0, device=self.device)
                 div_weight = 0.0
             
-
             # total_loss = loss_ce
             total_loss = loss_ce + bn_weight * loss_bn
-            
             # total_loss = loss_ce + bn_weight * loss_bn + shigh_weight * loss_shigh
             # total_loss = loss_ce + bn_weight * loss_bn + shigh_weight * loss_shigh + div_weight * loss_div
 
@@ -234,20 +287,20 @@ class OursServer(BaseServer):
                 'div_loss': loss_div.item()
             })
             
-            # 8. 更新钩子的动量统计
-            if self.bn_mmt != 0:
-                for h in self.hooks:
-                    h.update_mmt()
+            # # 8. 更新钩子的动量统计
+            # if self.bn_mmt != 0:
+            #     for h in self.hooks:
+            #         h.update_mmt()
             
             # 9. 打印训练信息
             if epoch % 10 == 0:
                 print(f"SYS Epoch {epoch}/{num_epochs}, Total Loss: {total_loss.item():.4f}, "
                       f"CE Loss: {loss_ce.item():.4f}, SC Loss: {loss_sc.item():.4f}, BN Loss: {loss_bn.item():.4f}, DIV Loss: {loss_div.item():.4f}")
         
-        # 清理钩子
-        for h in self.hooks:
-            h.remove()
-        self.hooks = []
+        # # 清理钩子
+        # for h in self.hooks:
+        #     h.remove()
+        # self.hooks = []
         
         print("Generator and Link Predictor training completed!")
 
@@ -399,8 +452,8 @@ class OursServer(BaseServer):
             low_weight = getattr(self.args, 'kd_low_weight', 0.2) # 低频蒸馏损失权重
             
             # 总损失
-            # total_loss = ce_weight * loss_ce
-            total_loss = ce_weight * loss_ce + low_weight * loss_kd_low
+            total_loss = ce_weight * loss_ce
+            # total_loss = ce_weight * loss_ce + low_weight * loss_kd_low
             # print("KD loss_ce.requires_grad:", loss_ce.requires_grad)
             # print("KD loss_kd_low.requires_grad:", loss_kd_low.requires_grad)
             # print("KD loss_kd_low:", loss_kd_low.item())
@@ -716,8 +769,8 @@ class OursClient(BaseClient):
 
         return loss.item()
     
-    #获得LED(Laplacian Energy Distribution)值
-    def get_LED(self, task_id):
+    #获得已经学习过的节点子图
+    def get_subgraph(self, task_id):
         """
         计算拉普拉斯能量分布(LED)值
         根据公式: \bar{x}_n = \frac{\hat{x}_n^2}{\sum_{i=1}^N \hat{x}_i^2}
@@ -731,21 +784,6 @@ class OursClient(BaseClient):
         
         # 需要获取原始完整数据
         original_data = self.data 
-        # if original_data is None:
-        #     # 如果没有原始数据，通过合并所有任务的数据来重建
-        #     all_nodes = []
-        #     for i in range(task_id):
-        #         task = self.tasks[i]
-        #         nodes_mask = task["train_mask"] | task["valid_mask"] | task["test_mask"]
-        #         nodes_indices = torch.where(nodes_mask)[0].tolist()
-        #         all_nodes.extend(nodes_indices)
-            
-        #     # 去重并排序
-        #     all_nodes = sorted(list(set(all_nodes)))
-            
-        #     # 使用第一个任务的子图作为基础来获取完整图结构
-        #     first_task_data = self.tasks[0]["local_data"]
-        #     return len(all_nodes) / first_task_data.x.shape[0]  # 简化的LED值
         
         for i in range(task_id): #已经学习的任务编号是[0, task_id - 1]
             task = self.tasks[i]
@@ -756,12 +794,15 @@ class OursClient(BaseClient):
             nodes_list.extend(nodes_indices)
         
         # 去重并排序，得到所有已学习的节点列表
-        nodes_list = sorted(list(set(nodes_list)))
+        # nodes_list = sorted(list(set(nodes_list)))
         
         # 获取包含已学习节点的子图
-        subgraph = get_subgraph_by_node(original_data, nodes_list)
+        subgraph = get_subgraph_by_node(original_data, nodes_list, True)
 
+        return subgraph
 
+    #获得LED(Laplacian Energy Distribution)值
+    def get_LED(self, subgraph):
         # 直接计算LED
         nodes_feature = subgraph.x  # [N, d] 节点特征矩阵
         edge_index = subgraph.edge_index
@@ -887,11 +928,42 @@ class OursClient(BaseClient):
         nodes_num = nodes_mask.sum()
         return nodes_num 
 
+    def get_mean_var(self, task_id):
+        task = self.tasks[task_id]
+        local_data = task["local_data"] 
+        #计算当前task_id中的data.x的均值和方差
+        
+        # 获取当前任务的训练节点特征
+        # train_mask = task["train_mask"]
+        # node_features = local_data.x[train_mask]  # 只使用训练节点的特征
+        node_features = local_data.x
+        
+        # 计算均值和方差
+        # 沿着节点维度(dim=0)计算，得到每个特征维度的统计信息
+        mean = torch.mean(node_features, dim=0)  # [feature_dim]
+        var = torch.var(node_features, dim=0, unbiased=False)  # [feature_dim], 使用总体方差
+        
+        return {
+            "mean": mean,  # 均值
+            "var": var     # 方差
+        }
+
+
+
     #向服务器发送信息
     def send_message(self, task_id):
+        if task_id == 0:
+            learned_nodes_num = 0
+            data_LED = 0.0
+        else:
+            subgraph = self.get_subgraph(task_id = task_id)
+            learned_nodes_num = subgraph.x.shape[0]
+            data_LED = self.get_LED(subgraph)
         self.message_pool[f"client_{self.client_id}"] = {
-            "nodes_num" : self.get_task_nodes_num(task_id),         #节点数量
-            "data_LED" : self.get_LED(task_id),                     #本地数据的
+            "nodes_num" : self.get_task_nodes_num(task_id),           #节点数量
+            "learned_nodes_num" : learned_nodes_num,                  #已学习的节点数量 
+            "data_LED" : data_LED,                                    #本地数据的
+            "mean_var" : self.get_mean_var(task_id),                  #本地数据的均值和方差信息
             "weight" : list(self.client_model.parameters())
         }
 

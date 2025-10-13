@@ -7,7 +7,7 @@ from torch_geometric.data import Data
 
 
 
-def get_subgraph_by_node(dataset, node_list):   #node_list是节点在data图中的索引
+def get_subgraph_by_node(dataset, node_list, flag):   #node_list是节点在dataset图中的索引
     node_id_set = set(node_list)
     global_id_to_local_id = {}
     local_id_to_global_id = []
@@ -27,8 +27,10 @@ def get_subgraph_by_node(dataset, node_list):   #node_list是节点在data图中
     local_edge_index = torch.tensor(local_edge_list).t()
     if not local_edge_list:
         local_edge_index = torch.empty((2, 0), dtype=torch.int64)
-    # local_subgraph = Data(x=dataset.x[node_list], edge_index=local_edge_index, y=dataset.y[node_list])
-    local_subgraph = Data(x=dataset.x, edge_index=local_edge_index, y=dataset.y)
+    if flag:        #为True表示不要每边的点
+        local_subgraph = Data(x=dataset.x[node_list], edge_index=local_edge_index, y=dataset.y[node_list])
+    else:
+        local_subgraph = Data(x=dataset.x, edge_index=local_edge_index, y=dataset.y)
     local_subgraph.global_map = local_id_to_global_id
 
     return local_subgraph
