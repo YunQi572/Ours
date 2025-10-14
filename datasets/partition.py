@@ -26,7 +26,7 @@ def get_subgraph_by_node(dataset, node_list, flag):   #node_list是节点在data
             global_edge_list.append((src, tgt))
 
     local_edge_index = torch.tensor(local_edge_list).t()
-    global_edge_list = torch.tensor(local_edge_list).t()
+    global_edge_list = torch.tensor(global_edge_list).t()
     if not local_edge_list:
         local_edge_index = torch.empty((2, 0), dtype=torch.int64)
     if flag:        #为True表示不要没边的点
