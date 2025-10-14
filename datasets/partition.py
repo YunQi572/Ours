@@ -6,12 +6,12 @@ import torch
 from torch_geometric.data import Data
 
 
-
 def get_subgraph_by_node(dataset, node_list, flag):   #node_list是节点在dataset图中的索引
     node_id_set = set(node_list)
     global_id_to_local_id = {}
     local_id_to_global_id = []
     local_edge_list = []
+    global_edge_list = []
     for local_id, global_id in enumerate(node_list):
         global_id_to_local_id[global_id] = local_id
         local_id_to_global_id.append(global_id)
@@ -23,14 +23,16 @@ def get_subgraph_by_node(dataset, node_list, flag):   #node_list是节点在data
             local_id_src = global_id_to_local_id[src]
             local_id_tgt = global_id_to_local_id[tgt]
             local_edge_list.append((local_id_src, local_id_tgt))
+            global_edge_list.append((src, tgt))
 
     local_edge_index = torch.tensor(local_edge_list).t()
+    global_edge_list = torch.tensor(local_edge_list).t()
     if not local_edge_list:
         local_edge_index = torch.empty((2, 0), dtype=torch.int64)
-    if flag:        #为True表示不要每边的点
+    if flag:        #为True表示不要没边的点
         local_subgraph = Data(x=dataset.x[node_list], edge_index=local_edge_index, y=dataset.y[node_list])
     else:
-        local_subgraph = Data(x=dataset.x, edge_index=local_edge_index, y=dataset.y)
+        local_subgraph = Data(x=dataset.x, edge_index=global_edge_list, y=dataset.y)
     local_subgraph.global_map = local_id_to_global_id
 
     return local_subgraph
@@ -51,7 +53,7 @@ def louvain_partitioner(data, num_clients):
 
     
     le = LabelEncoder()                 #一个LabelEncoder的对象，将可能是字符串或其他类型的类别标签编码为整数
-    labels = le.fit_transform(data.y.numpy())       #将节点标签张良转换为Numpy数组然后转为整数
+    labels = le.fit_transform(data.y.numpy())       #将节点标签张量转换为Numpy数组然后转为整数
     for i, label in enumerate(labels):              
         G.nodes[i]['label'] = label
 
@@ -102,39 +104,8 @@ def louvain_partitioner(data, num_clients):
         sub_x = data.x[nodes]           #当前客户端节点的特征和标签
         sub_y = data.y[nodes]
         sub_data = Data(x=sub_x, edge_index=sub_edge_index,y =sub_y)        #当前客户端的子图
-
-        # if hasattr(data, "train_mask"):
-        #     train_mask = torch.zeros(len(nodes), dtype=torch.bool)
-        #     for node in nodes:
-        #         train_mask[node_map[node]] = data.train_mask[node]
-        #     sub_data.train_mask = train_mask
-
-        # if hasattr(data, "val_mask"):
-        #     val_mask = torch.zeros(len(nodes), dtype=torch.bool)
-        #     for node in nodes:
-        #         val_mask[node_map[node]] = data.val_mask[node]
-        #     sub_data.val_mask = val_mask
-
-        # if hasattr(data, "test_mask"):
-        #     test_mask = torch.zeros(len(nodes), dtype=torch.bool)
-        #     for node in nodes:
-        #         test_mask[node_map[node]] = data.test_mask[node]
-        #     sub_data.test_mask = test_mask
-
+        
         clients_data.append(sub_data)
-
-    # import matplotlib.pyplot as plt
-    # listy = data.y.tolist()
-    # num_classes = len(np.unique(listy))
-    # label_distribution = [[] for _ in range(num_classes)]
-    # for cid, client_data in enumerate(clients_data):
-    #     for label in client_data.y:
-    #         label_distribution[label].append(cid)
-    # plt.hist(label_distribution, stacked=True, label=range(num_classes))
-    # plt.xlabel("client_id")
-    # plt.ylabel("num_samples")
-    # plt.show()
-
     return clients_data
 
 
