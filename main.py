@@ -118,6 +118,7 @@ def main():
             print("Server broadcasting updated global model...")
             server.send_message()
         
+
         # 如果不是第一个任务，进行生成器训练、数据生成和知识蒸馏
         if task_id != 0:
             print(f"Training generator and link predictor for task {task_id}...")
@@ -128,7 +129,6 @@ def main():
             
             print("Performing knowledge distillation...")
             server.KD_train(task_id)
-
 
         server.update_last_global_model()
 
